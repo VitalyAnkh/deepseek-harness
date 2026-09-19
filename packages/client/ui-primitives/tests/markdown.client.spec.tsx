@@ -5,6 +5,7 @@ import { JsonBlock, MarkdownText } from './markdown-test-components.tsx'
 import { LinkIcon, MarkdownDelegateProvider } from '../src/index.ts'
 import { cjkFriendlyStrong } from '../src/markdown/cjkFriendlyStrong.ts'
 import { mathCompatibility } from '../src/markdown/mathCompatibility.ts'
+import { parseGfmWithMath } from '../src/markdown/parse.ts'
 
 afterEach(cleanup)
 
@@ -473,7 +474,23 @@ describe('MarkdownText', () => {
 
   it('keeps ordinary dollar blocks and incomplete delimiter candidates parseable', () => {
     const cases = [
-      { source: '$$\n\\theta\n$$', math: 1, display: 1 },
+      { source: '$$\n\\theta\n$$', math: 1, display: 1, value: '\\theta' },
+      { source: '$$a,\nb$$', math: 1, display: 1, value: 'a,\nb' },
+      { source: '$$a,\n$$', math: 1, display: 1, value: 'a,' },
+      { source: '$$\n\\theta\n$$$', math: 1, display: 1, value: '\\theta' },
+      // The failed block leaves its own line literal, and the fence on line 3
+      // opens the block that closes on line 4.
+      { source: '$$\na\n$$ b\n$$', math: 1, display: 1, value: ' b' },
+      { source: '$$$\n\\theta\n$$$', math: 1, display: 1, value: '\\theta' },
+      { source: '$$$$\n\\theta\n$$$$', math: 1, display: 1, value: '\\theta' },
+      { source: '$$$ \n\\theta\n$$$', math: 1, display: 1, value: '\\theta' },
+      { source: '$$$  \n\\theta\n$$$', math: 1, display: 1, value: '\\theta' },
+      { source: '$$$\n\\theta\n$$', math: 1, display: 1, value: '\\theta' },
+      { source: '> $$$ \n> a\n> $$$', math: 1, display: 1, value: 'a' },
+      { source: '$$$', math: 0, display: 0 },
+      { source: '- $$\n  a,\n  b$$', math: 1, display: 1, value: 'a,\nb' },
+      { source: '> $$a,\n> b$$', math: 1, display: 1, value: 'a,\nb' },
+      { source: '$$x', math: 0, display: 0 },
       { source: '$$$\\theta$$$', math: 1, display: 0 },
       { source: '$$a$b\nc', math: 0, display: 0 },
       { source: '  \\[\n  \\theta\n  \\]', math: 1, display: 1 },
@@ -485,11 +502,94 @@ describe('MarkdownText', () => {
 
     for (const item of cases) {
       const rendered = render(<MarkdownText text={item.source} />)
-      expect(rendered.container.querySelectorAll('.katex')).toHaveLength(item.math)
-      expect(rendered.container.querySelectorAll('.katex-display')).toHaveLength(item.display)
-      expect(rendered.container.querySelector('.katex-error')).toBeNull()
+      expect(rendered.container.querySelectorAll('.katex'), item.source).toHaveLength(item.math)
+      expect(rendered.container.querySelectorAll('.katex-display'), item.source).toHaveLength(item.display)
+      expect(rendered.container.querySelector('.katex-error'), item.source).toBeNull()
+      if ('value' in item) {
+        expect(rendered.container.querySelector('annotation')?.textContent, item.source).toBe(item.value)
+      }
       rendered.unmount()
     }
+  })
+
+  it('renders a dollar block whose closing fence ends a content line', () => {
+    const source = [
+      '$$\\sec_g(X, Y) = \\frac{1}{\\lambda},',
+      '\\qquad \\Omega^k = 0$$',
+      '',
+      '**after** the block',
+      '',
+      '- item',
+    ].join('\n')
+    const { container } = render(<MarkdownText text={source} />)
+
+    expect(container.querySelectorAll('.katex-display')).toHaveLength(1)
+    expect(container.querySelector('.katex-display annotation')?.textContent)
+      .toBe('\\sec_g(X, Y) = \\frac{1}{\\lambda},\n\\qquad \\Omega^k = 0')
+    expect(container.querySelector('strong')?.textContent).toBe('after')
+    expect(container.querySelectorAll('li')).toHaveLength(1)
+    expect(container.querySelector('.katex-error')).toBeNull()
+  })
+
+  it('keeps an unclosed dollar block literal instead of consuming the reply', () => {
+    const source = ['$$\\frac{1}{2}', '', '**still markdown**', '', '- item'].join('\n')
+    const { container } = render(<MarkdownText text={source} />)
+
+    expect(container.querySelectorAll('.katex')).toHaveLength(0)
+    expect(container.querySelector('.katex-error')).toBeNull()
+    expect(container.querySelector('strong')?.textContent).toBe('still markdown')
+    // The block's own line, the paragraph after it, and the list marker all stay
+    // literal text: an unclosed block leaves a following list unparsed, as an
+    // unclosed `\[` already does.
+    expect([...container.querySelectorAll('p')].map(node => node.textContent))
+      .toEqual(['$$\\frac{1}{2}', 'still markdown', '- item'])
+
+    // Headings after an unclosed block are unaffected, unlike a list or blockquote.
+    const heading = render(<MarkdownText text={'$$\\frac{1}{2}\n\n# Heading'} />)
+    expect(heading.container.querySelector('h1')?.textContent).toBe('Heading')
+  })
+
+  it('bounds fallback work for repeated unclosed dollar blocks', () => {
+    // The timing line is an anti-hang guard; the structural lines carry the
+    // regression (a runaway block leaves no paragraph behind).
+    const startedAt = performance.now()
+    const { container } = render(<MarkdownText text={'$$x\n\n'.repeat(6_000)} />)
+
+    expect(performance.now() - startedAt).toBeLessThan(3_000)
+    expect(container.querySelectorAll('.katex')).toHaveLength(0)
+    expect(container.querySelectorAll('p')).toHaveLength(6_000)
+  })
+
+  it('keeps a mid-line dollar pair inside the formula', () => {
+    // Parsed directly: TeX rejects `$` in math mode, so the rendered arm would
+    // only show KaTeX's error span for the same value. Upstream's flow produced
+    // the same value here; this pins the mid-line rule a same-line-only
+    // compatibility construct got wrong.
+    const [first] = parseGfmWithMath('$$\na $$ b\n$$').children as Array<{ type: string; value?: string }>
+
+    expect(first?.type).toBe('math')
+    expect(first?.value).toBe('a $$ b')
+  })
+
+  it('keeps a longer fence with content on its line inline', () => {
+    // Whitespace after a longer fence run must end the line; `$$$ $ $` is not a
+    // block, so it falls back to upstream's inline text math.
+    const [first] = parseGfmWithMath('$$$ $ $\n\\theta\n$$$').children as
+      Array<{ type: string; children?: Array<{ type: string }> }>
+
+    expect(first?.type).toBe('paragraph')
+    expect(first?.children?.[0]?.type).toBe('inlineMath')
+    expect((first?.children ?? []).some(node => node.type === 'math')).toBe(false)
+  })
+
+  it('keeps an unclosed block that ends on an odd backslash run literal and its parse bounded', () => {
+    // Parsed directly: rendering this shape would measure KaTeX work for the
+    // inline dollar pairs it falls back to, not the construct's own fallback.
+    const startedAt = performance.now()
+    const children = parseGfmWithMath('$$ \\\n'.repeat(4_000)).children as Array<{ type: string }>
+
+    expect(performance.now() - startedAt).toBeLessThan(3_000)
+    expect(children.some(node => node.type === 'math')).toBe(false)
   })
 
   it('lets display math interrupt an open paragraph', () => {

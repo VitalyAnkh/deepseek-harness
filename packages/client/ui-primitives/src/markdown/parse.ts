@@ -4,8 +4,10 @@
  * parses, and the plain-text projection of a given grammar always agree on
  * where blocks start and end — and the settled grammar is the streaming one
  * plus the math extensions, so the arms differ only where TeX delimiters
- * begin a math construct (a `$$` block is a paragraph while streaming and a
- * math block once settled, by design).
+ * begin a math construct (a closed `$$` block is a paragraph while streaming
+ * and a math block once settled, by design; a block that never closes stays
+ * literal text in both arms, and a list or blockquote after one stays literal
+ * text once settled too).
  */
 
 import type { Root } from 'mdast'
@@ -13,7 +15,6 @@ import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { mathFromMarkdown } from 'mdast-util-math'
 import { gfm } from 'micromark-extension-gfm'
-import { math } from 'micromark-extension-math'
 import { cjkFriendlyStrong } from './cjkFriendlyStrong.ts'
 import { mathCompatibility } from './mathCompatibility.ts'
 
@@ -38,7 +39,7 @@ export function parseGfm(text: string): Root {
  */
 export function parseGfmWithMath(text: string): Root {
   return fromMarkdown(text, {
-    extensions: [gfm(), cjkFriendlyStrong(), mathCompatibility(), math()],
+    extensions: [gfm(), cjkFriendlyStrong(), mathCompatibility()],
     mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()],
   })
 }
