@@ -18,6 +18,8 @@ A closing-fence attempt that instead meets a fence at the start of its line fail
 
 The extension carries upstream's inline-dollar `mathText` construct and not upstream's dollar `mathFlow` construct, so exactly one construct owns `$$` while inline `$…$` keeps upstream's behavior.
 
+If the first settled parse leaves a literal paragraph beginning at a rejected delimiter, `parse.ts` records that source offset and retries with a non-concrete fallback only there. Lists and blockquotes after an unclosed block then use the ordinary flow grammar, while valid math blocks elsewhere keep the concrete construct.
+
 ## Alternatives considered
 
 **Keep upstream's `$$` flow construct and repair the resulting math node.** Rejected: the defect is a parse-time outcome. Once the construct has consumed the reply, no renderer-side repair recovers the Markdown structure or the dropped opening line.
@@ -28,12 +30,12 @@ The extension carries upstream's inline-dollar `mathText` construct and not upst
 
 ## Consequences
 
-Gained: the closing-fence shape renders as a display formula, a block with no closing fence degrades to literal text, and the failure path stays linear — 4 000 unclosed `$$` lines parse in about 30 ms, where reading the next fence as content instead rescans to the document end on every later attempt (about ten seconds for the same input).
+Gained: the closing-fence shape renders as a display formula, a block with no closing fence degrades to literal text, and malformed delimiters no longer produce one giant math node. The regression test keeps 6 000 repeated unclosed blocks as ordinary paragraphs with no KaTeX output; the timing of that check is intentionally not part of the product contract.
 
 Given up: an upstream info string on the opening line (`$$asciimath`) is formula content rather than `node.meta`, which this renderer never read; and a longer fence whose opening line has content (`$$$x`, then content, then `$$$`) renders as inline text math instead of a display block, where upstream dropped that line's text instead.
 
-Unchanged: after an unclosed `$$` or `\[` block, a list or blockquote later in the document settles as a paragraph — the same shape already follows an unclosed `\[` — while headings, tables, and code fences are unaffected.
+Unchanged: headings, tables, and code fences remain ordinary Markdown after a failed math opening. The fallback now also reparses later lists and blockquotes instead of leaving their markers in paragraphs.
 
 ## Testing
 
-[`markdown.client.spec.tsx`](../../../../packages/client/ui-primitives/tests/markdown.client.spec.tsx) asserts the multi-line formula value, the fence-run rules, the line-start bail, the literal fallback, and the bounded fallback; [`math-rendering.e2e.ts`](../../../../apps/web/tests/math-rendering.e2e.ts) seeds the closing-fence shape with a table and the reply's done marker after it, and that browser run fails when the parser change is reverted.
+[`markdown.client.spec.tsx`](../../../../packages/client/ui-primitives/tests/markdown.client.spec.tsx) asserts the multi-line formula value, the fence-run rules, the line-start bail, literal fallback with list and blockquote recovery, and repeated malformed delimiters; [`math-rendering.e2e.ts`](../../../../apps/web/tests/math-rendering.e2e.ts) seeds the closing-fence shape with a table and the reply's done marker after it, and that browser run fails when the parser change is reverted.

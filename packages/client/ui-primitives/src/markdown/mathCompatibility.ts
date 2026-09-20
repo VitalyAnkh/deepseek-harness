@@ -130,7 +130,18 @@ const tokenizeBackslashMathText: Tokenizer = function (effects, ok, nok) {
   }
 }
 
-function createMathFlow(marker: number, openMarker: number, closeMarker: number): Construct {
+type MathFlowOptions = {
+  concrete: boolean
+  onlyAt?: ReadonlySet<number>
+  excludeAt?: ReadonlySet<number>
+}
+
+function createMathFlow(
+  marker: number,
+  openMarker: number,
+  closeMarker: number,
+  options: MathFlowOptions = { concrete: true },
+): Construct {
   const tokenize: Tokenizer = function (effects, ok, nok) {
     const self = this
     let oddBackslashRun = false
@@ -145,6 +156,9 @@ function createMathFlow(marker: number, openMarker: number, closeMarker: number)
     function start(code: number | null): State | undefined {
       /* v8 ignore next -- the flow construct is dispatched only for its marker. */
       if (code !== marker) return nok(code)
+      const offset = self.now().offset
+      if (options.onlyAt !== undefined && !options.onlyAt.has(offset)) return nok(code)
+      if (options.excludeAt?.has(offset)) return nok(code)
       effects.enter('mathFlow')
       effects.enter('mathFlowFence')
       effects.enter('mathFlowFenceSequence')
@@ -337,8 +351,10 @@ function createMathFlow(marker: number, openMarker: number, closeMarker: number)
   }
 
   return {
-    concrete: true,
-    name: marker === codes.dollarSign ? 'dollarMathFlow' : 'backslashMathFlow',
+    concrete: options.concrete,
+    name: marker === codes.dollarSign
+      ? (options.concrete ? 'dollarMathFlow' : 'dollarMathFlowFallback')
+      : (options.concrete ? 'backslashMathFlow' : 'backslashMathFlowFallback'),
     tokenize,
   }
 }
@@ -375,30 +391,59 @@ const backslashMathText: Construct = {
   tokenize: tokenizeBackslashMathText,
 }
 
-const backslashMathFlow = createMathFlow(
-  codes.backslash,
-  codes.leftSquareBracket,
-  codes.rightSquareBracket,
-)
-
 // Upstream reads the rest of an opening `$$` line as the `mathFlowFenceMeta`
 // token and drops it; keeping that text as formula content is what lets a block
 // start on the opening line, at the cost that a `$$asciimath` meta string now
 // renders as part of the formula.
-const dollarMathFlow = createMathFlow(
-  codes.dollarSign,
-  codes.dollarSign,
-  codes.dollarSign,
-)
+const compatibilityText = { ...math().text, [codes.backslash]: backslashMathText }
 
-const compatibilityMath: Extension = {
-  flow: {
-    [codes.backslash]: backslashMathFlow,
-    [codes.dollarSign]: dollarMathFlow,
-  },
-  // Upstream's inline-dollar text math; its `$$` flow construct is replaced by
-  // `dollarMathFlow` above.
-  text: { ...math().text, [codes.backslash]: backslashMathText },
+function createCompatibilityMath(fallbackOffsets?: ReadonlySet<number>): Extension {
+  const hasFallbacks = fallbackOffsets !== undefined && fallbackOffsets.size > 0
+  const backslashMathFlow = createMathFlow(
+    codes.backslash,
+    codes.leftSquareBracket,
+    codes.rightSquareBracket,
+    hasFallbacks ? { concrete: true, excludeAt: fallbackOffsets } : undefined,
+  )
+  const dollarMathFlow = createMathFlow(
+    codes.dollarSign,
+    codes.dollarSign,
+    codes.dollarSign,
+    hasFallbacks ? { concrete: true, excludeAt: fallbackOffsets } : undefined,
+  )
+  return {
+    flow: {
+      [codes.backslash]: hasFallbacks
+        ? [
+          createMathFlow(codes.backslash, codes.leftSquareBracket, codes.rightSquareBracket, {
+            concrete: false,
+            onlyAt: fallbackOffsets,
+          }),
+          backslashMathFlow,
+        ]
+        : backslashMathFlow,
+      [codes.dollarSign]: hasFallbacks
+        ? [
+          createMathFlow(codes.dollarSign, codes.dollarSign, codes.dollarSign, {
+            concrete: false,
+            onlyAt: fallbackOffsets,
+          }),
+          dollarMathFlow,
+        ]
+        : dollarMathFlow,
+    },
+    // Upstream's inline-dollar text math; its `$$` flow construct is replaced by
+    // `dollarMathFlow` above.
+    text: compatibilityText,
+  }
+}
+
+const compatibilityMath = createCompatibilityMath()
+
+/** Options for recovering Markdown after a failed math-flow attempt. */
+export type MathCompatibilityOptions = {
+  /** Offsets where a known-unclosed delimiter should use a non-concrete flow. */
+  fallbackOffsets?: ReadonlySet<number>
 }
 
 /**
@@ -408,8 +453,12 @@ const compatibilityMath: Extension = {
  * emitted tokens compile to standard math nodes, and must not also register
  * upstream `math()`, whose `$$` flow construct micromark would then try first
  * and run to the end of the document again.
- * @returns The micromark syntax extension, the same object on every call.
+ * @param options - Optional offsets that need a non-concrete fallback.
+ * @returns The micromark syntax extension, the same object when no options are given.
  */
-export function mathCompatibility(): Extension {
-  return compatibilityMath
+export function mathCompatibility(options?: MathCompatibilityOptions): Extension {
+  const fallbackOffsets = options?.fallbackOffsets
+  return fallbackOffsets === undefined || fallbackOffsets.size === 0
+    ? compatibilityMath
+    : createCompatibilityMath(fallbackOffsets)
 }
